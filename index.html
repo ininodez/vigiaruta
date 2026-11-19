@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>VigíaRuta · Detector de somnolencia para choferes</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#121923; --line:#1f2a37; --text:#e6edf3; --mute:#8b98a8;
+    --ok:#22c55e; --warn:#eab308; --high:#f97316; --danger:#ef4444; --accent:#38bdf8;
+  }
+  *{box-sizing:border-box}
+  [hidden]{display:none!important}
+  html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .sub{color:var(--mute);font-size:12px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--mute)}
+  main{max-width:1100px;margin:0 auto;padding:12px;display:grid;gap:12px;grid-template-columns:1fr}
+  @media (min-width:900px){main{grid-template-columns:1.25fr 1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px}
+  .stage{position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:10px;overflow:hidden}
+  .stage video,.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+  .stage.nomirror video,.stage.nomirror canvas{transform:none}
+  .stage .hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:var(--mute)}
+  .badge{position:absolute;left:10px;top:10px;background:rgba(0,0,0,.6);padding:4px 10px;border-radius:999px;font-size:12px}
+  .status{border-radius:12px;padding:14px;display:flex;align-items:center;gap:14px;transition:background .3s}
+  .status .big{font-size:22px;font-weight:700}
+  .status .msg{font-size:13px;opacity:.9}
+  .gauge{flex:0 0 74px;height:74px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:20px;background:conic-gradient(var(--c,var(--ok)) calc(var(--p,0)*1%),#0006 0)}
+  .gauge span{width:58px;height:58px;border-radius:50%;background:var(--panel);display:grid;place-items:center}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
+  @media (min-width:520px){.grid{grid-template-columns:repeat(4,1fr)}}
+  .m{background:#0e141c;border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+  .m .k{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.4px}
+  .m .v{font-size:20px;font-weight:650;margin-top:2px}
+  .bar{height:6px;background:#0006;border-radius:6px;overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+  .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  button,select,input[type=range]{font:inherit}
+  button{border:1px solid var(--line);background:#1a2430;color:var(--text);padding:10px 14px;border-radius:10px;cursor:pointer}
+  button.primary{background:var(--accent);color:#04121c;border-color:transparent;font-weight:650}
+  button.danger{background:var(--danger);border-color:transparent;color:#fff;font-weight:650}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+  select{width:100%;background:#0e141c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+  input[type=range]{width:100%}
+  .row{display:flex;gap:10px;align-items:center}
+  .row output{min-width:54px;text-align:right;color:var(--text)}
+  .log{max-height:220px;overflow:auto;font-size:13px;margin:0;padding:0;list-style:none}
+  .log li{padding:6px 0;border-bottom:1px dashed var(--line);display:flex;gap:8px}
+  .log time{color:var(--mute);font-variant-numeric:tabular-nums}
+  .note{font-size:12px;color:var(--mute)}
+  h2{font-size:14px;margin:0 0 6px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+  details summary{cursor:pointer;color:var(--mute)}
+  /* Alarm overlay */
+  #alarm{position:fixed;inset:0;display:none;z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:18px;text-align:center;background:#b91c1c;animation:flash .5s steps(2) infinite}
+  #alarm.on{display:flex}
+  #alarm h3{font-size:clamp(38px,10vw,84px);margin:0;font-weight:900;color:#fff;text-shadow:0 4px 18px #0008}
+  #alarm p{font-size:20px;margin:0;color:#fff}
+  #alarm button{font-size:22px;padding:18px 28px;background:#fff;color:#b91c1c;border:none;font-weight:800}
+  @keyframes flash{0%{background:#b91c1c}50%{background:#fde047}}
+  /* Stop recommendation modal */
+  #stop{position:fixed;inset:0;display:none;z-index:40;align-items:center;justify-content:center;background:#000a;padding:16px}
+  #stop.on{display:flex}
+  #stop .box{max-width:460px;background:var(--panel);border:2px solid var(--high);border-radius:16px;padding:20px;text-align:center}
+  #stop h3{margin:0 0 8px;font-size:24px;color:var(--high)}
+  #toast{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:45;background:#111c;border:2px solid var(--warn);color:#fff;font-size:20px;font-weight:700;padding:12px 18px;border-radius:14px;display:none;max-width:92vw;text-align:center}
+  #toast.on{display:block}
+  #stop p{margin:0 0 14px}
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="hdot"></div>
+  <div>
+    <h1>VigíaRuta</h1>
+    <div class="sub">Detector de somnolencia para choferes · todo se procesa en este dispositivo</div>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="overlay"></canvas>
+      <div class="hint" id="hint">Pon el teléfono o laptop frente al chofer, con la cara bien iluminada, y toca <b>&nbsp;Iniciar&nbsp;</b>.</div>
+      <div class="badge" id="fps" hidden>—</div>
+    </div>
+    <div class="btns">
+      <button class="primary" id="btnStart">Iniciar</button>
+      <button id="btnStop" disabled>Detener</button>
+      <button id="btnCalib" disabled>Recalibrar</button>
+      <button id="btnTest">Probar alarma</button>
+      <button id="btnRest" disabled>Tomé un descanso</button>
+    </div>
+    <p class="note">Mantén la app abierta y en primer plano, con el volumen al máximo y el teléfono cargando. Los navegadores pausan la cámara si cambias de app o se bloquea la pantalla (la app intenta mantener la pantalla encendida).</p>
+  </section>
+
+  <section class="card">
+    <div class="status" id="status" style="background:#0e141c">
+      <div class="gauge" id="gauge"><span id="gaugeV">0</span></div>
+      <div>
+        <div class="big" id="stBig">En espera</div>
+        <div class="msg" id="stMsg">Toca Iniciar para comenzar el monitoreo.</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="m"><div class="k">Ojos</div><div class="v" id="mEyes">—</div><div class="bar"><i id="bEyes"></i></div></div>
+      <div class="m"><div class="k">Cierre actual</div><div class="v" id="mClose">0.0 s</div><div class="bar"><i id="bClose"></i></div></div>
+      <div class="m"><div class="k">PERCLOS 1 min</div><div class="v" id="mPerclos">—</div><div class="bar"><i id="bPerclos"></i></div></div>
+      <div class="m"><div class="k">Bostezos 10 min</div><div class="v" id="mYawn">0</div></div>
+      <div class="m"><div class="k">Microsueños 10 min</div><div class="v" id="mLong">0</div></div>
+      <div class="m"><div class="k">Parpadeo prom.</div><div class="v" id="mBlink">—</div></div>
+      <div class="m"><div class="k">Cabeceos 10 min</div><div class="v" id="mNod">0</div></div>
+      <div class="m"><div class="k">Conduciendo</div><div class="v" id="mDrive">0:00</div></div>
+    </div>
+    <p class="note">PERCLOS = porcentaje del último minuto con los ojos cerrados. Es el indicador de fatiga más usado en la industria: sobre 15% indica sueño.</p>
+  </section>
+
+  <section class="card">
+    <h2>Ajustes</h2>
+    <label for="selCam">Cámara</label>
+    <select id="selCam"><option value="">Cámara frontal (por defecto)</option></select>
+    <label for="selSens">Sensibilidad de ojos cerrados</label>
+    <select id="selSens">
+      <option value="alta">Alta (detecta antes, más falsas alarmas)</option>
+      <option value="media" selected>Media (recomendada)</option>
+      <option value="baja">Baja (para lentes o ojos muy rasgados)</option>
+    </select>
+    <label for="rngAlarm">Alarma fuerte si los ojos siguen cerrados por</label>
+    <div class="row"><input type="range" id="rngAlarm" min="1" max="4" step="0.5" value="2"><output id="oAlarm">2.0 s</output></div>
+    <label for="rngNod">Cabeceo: cabeza caída por al menos</label>
+    <div class="row"><input type="range" id="rngNod" min="0.3" max="1.5" step="0.1" value="0.5"><output id="oNod">0.5 s</output></div>
+    <label for="rngBreak">Recordar pausa cada</label>
+    <div class="row"><input type="range" id="rngBreak" min="1" max="5" step="0.5" value="2"><output id="oBreak">2.0 h</output></div>
+    <label><input type="checkbox" id="chkVoice" checked> Avisos por voz</label>
+    <label><input type="checkbox" id="chkMirror" checked> Vista en espejo</label>
+    <details style="margin-top:10px"><summary>Probar con un video grabado</summary>
+      <p class="note">Sube un video del chofer para ver cómo lo evalúa la app (no sale de este dispositivo).</p>
+      <input type="file" id="fileVid" accept="video/*">
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Eventos</h2>
+    <ul class="log" id="log"><li><time>--:--</time><span>Sin eventos todavía.</span></li></ul>
+  </section>
+
+  <section class="card" style="grid-column:1/-1">
+    <details><summary>Cómo funciona y límites</summary>
+      <ul class="note">
+        <li>Un modelo de visión (MediaPipe Face Landmarker) ubica 478 puntos de la cara en cada cuadro, directamente en el navegador. El video nunca se sube a internet.</li>
+        <li>Los primeros 4 segundos calibran tus ojos abiertos y la posición normal de la cabeza: mira al frente con los ojos abiertos.</li>
+        <li>Señales que mide: cierres de ojos prolongados (microsueños, ≥1 s), PERCLOS, duración del parpadeo, bostezos (boca muy abierta ≥1,2 s; los ojos entrecerrados del bostezo no cuentan como microsueño). Con 3 bostezos, 2 microsueños o 2 cabeceos en 10 minutos pide detenerse, cabeceos (cabeza que cae hacia adelante, atrás o a un lado ≥0,5 s, o que sale de cuadro al caer) y tiempo de conducción.</li>
+        <li>Si los ojos quedan cerrados más que el tiempo configurado (2 s por defecto), suena una sirena fuerte, vibra y la pantalla parpadea hasta que el chofer abre los ojos o toca "Estoy despierto".</li>
+        <li>Con varias señales de sueño, pide detenerse a descansar al menos 15 minutos.</li>
+        <li>Límites: es una ayuda, no reemplaza el descanso ni un sistema certificado. De noche la cámara necesita algo de luz en la cara. Lentes oscuros impiden ver los ojos. El navegador no puede sonar si la app está cerrada o en segundo plano.</li>
+      </ul>
+    </details>
+  </section>
+</main>
+
+<div id="alarm" role="alertdialog" aria-live="assertive">
+  <h3>¡DESPIERTA!</h3>
+  <p id="alarmWhy">Ojos cerrados demasiado tiempo</p>
+  <button id="btnAwake">Estoy despierto</button>
+</div>
+
+<div id="toast" aria-live="polite"></div>
+
+<div id="stop" role="dialog">
+  <div class="box">
+    <h3>Detente a descansar</h3>
+    <p id="stopWhy">Se detectaron varias señales de sueño.</p>
+    <p class="note">Busca un lugar seguro, detén el camión y descansa al menos 15–20 minutos. Una siesta corta o caminar ayuda; el café solo retrasa el sueño.</p>
+    <div class="btns" style="justify-content:center">
+      <button class="primary" id="btnStopOk">Entendido</button>
+      <button id="btnStopRest">Ya descansé</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { Detector, DEFAULTS } from "./detector.js?v=2";
+
+const $ = id => document.getElementById(id);
+const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const params = new URLSearchParams(location.search);
+
+/* ---------- Settings ---------- */
+const S = Object.assign({ sensitivity: 'media', alarmSec: 2, nodSec: DEFAULTS.nodSec, breakHours: 2, voice: true, mirror: true, camId: '' },
+  JSON.parse(localStorage.getItem('vigiaruta') || '{}'));
+if (S.nodSec > 1.5 || S.nodSec < 0.3) S.nodSec = DEFAULTS.nodSec;
+const save = () => localStorage.setItem('vigiaruta', JSON.stringify(S));
+const det = new Detector({ sensitivity: S.sensitivity, alarmSec: S.alarmSec, nodSec: S.nodSec });
+$('selSens').value = S.sensitivity; $('rngAlarm').value = S.alarmSec; $('rngBreak').value = S.breakHours; $('rngNod').value = S.nodSec;
+$('chkVoice').checked = S.voice; $('chkMirror').checked = S.mirror;
+const syncOut = () => { $('oAlarm').textContent = (+S.alarmSec).toFixed(1) + ' s'; $('oBreak').textContent = (+S.breakHours).toFixed(1) + ' h';
+  $('oNod').textContent = (+S.nodSec).toFixed(1) + ' s'; $('stage').classList.toggle('nomirror', !S.mirror);
+  det.setConfig({ sensitivity: S.sensitivity, alarmSec: +S.alarmSec, nodSec: +S.nodSec }); };
+syncOut();
+$('selSens').onchange = e => { S.sensitivity = e.target.value; save(); syncOut(); };
+$('rngAlarm').oninput = e => { S.alarmSec = +e.target.value; save(); syncOut(); };
+$('rngNod').oninput = e => { S.nodSec = +e.target.value; save(); syncOut(); };
+$('rngBreak').oninput = e => { S.breakHours = +e.target.value; save(); syncOut(); };
+$('chkVoice').onchange = e => { S.voice = e.target.checked; save(); };
+$('chkMirror').onchange = e => { S.mirror = e.target.checked; save(); syncOut(); };
+$('selCam').onchange = async e => { S.camId = e.target.value; save(); if (running && !usingFile) { await openCamera(); } };
+
+/* ---------- Sounds (WAV played through <audio>: also rings on iPhone in silent mode) ---------- */
+function makeWav(seconds, fn, sr = 22050) {
+  const n = Math.floor(seconds * sr), buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  let ph = 0;
+  for (let i = 0; i < n; i++) { const t = i / sr, { f, a, sq } = fn(t); ph += 2 * Math.PI * f / sr;
+    const s = Math.sin(ph), x = sq ? clamp(s * 3, -1, 1) : s; v.setInt16(44 + i * 2, clamp(x * a, -1, 1) * 32767, true); }
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+const sirenUrl = makeWav(2, t => ({ f: Math.floor(t * 4) % 2 ? 1650 : 980, a: 1, sq: true }));
+const chimeUrl = makeWav(1.4, t => ({ f: t < 0.45 ? 660 : t < 0.9 ? 880 : 990, a: 0.7 * Math.exp(-((t % 0.45) * 3)), sq: false }));
+const beepUrl = makeWav(0.5, t => ({ f: t < 0.22 ? 1200 : t < 0.28 ? 0 : 1200, a: t < 0.22 || t > 0.28 ? 0.9 : 0, sq: true }));
+const siren = new Audio(sirenUrl); siren.loop = true; siren.volume = 1;
+const chime = new Audio(chimeUrl); chime.volume = 1;
+const beep = new Audio(beepUrl); beep.volume = 1;
+async function unlockAudio() {
+  for (const a of [siren, chime, beep]) { try { a.muted = true; await a.play(); a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} }
+}
+function say(text) {
+  if (!S.voice || !('speechSynthesis' in window)) return;
+  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = 'es-CL'; u.rate = 1.05; u.volume = 1; speechSynthesis.speak(u); } catch (e) {}
+}
+let toastT = 0;
+function toast(text, color = 'var(--warn)') { const el = $('toast'); el.textContent = text; el.style.borderColor = color; el.classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 2600); }
+
+/* ---------- Wake lock ---------- */
+let wakeLock = null;
+async function keepAwake() { try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) keepAwake();
+  if (document.visibilityState === 'hidden' && running) addLog('⚠️ App en segundo plano: el monitoreo queda en pausa');
+});
+
+/* ---------- Log ---------- */
+let logEmpty = true;
+function addLog(text) {
+  const li = document.createElement('li');
+  li.innerHTML = `<time>${new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time><span></span>`;
+  li.querySelector('span').textContent = text;
+  if (logEmpty) { $('log').innerHTML = ''; logEmpty = false; }
+  $('log').prepend(li);
+}
+
+/* ---------- Geometry ---------- */
+const LEFT = [33, 160, 158, 133, 153, 144], RIGHT = [362, 385, 387, 263, 373, 380];
+const EYE_RING_L = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
+const EYE_RING_R = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398];
+const MOUTH = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191];
+let W = 640, H = 480;
+const P = (lm, i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+function ear(lm, idx) { const p = idx.map(i => P(lm, i)); return (d(p[1], p[5]) + d(p[2], p[4])) / (2 * d(p[0], p[3]) + 1e-6); }
+function mar(lm) { return d(P(lm, 13), P(lm, 14)) / (d(P(lm, 78), P(lm, 308)) + 1e-6); }
+// Head angles from MediaPipe's facial transformation matrix (column-major 4x4). pitch > 0 = head down.
+function headAngles(res) {
+  const m = res.facialTransformationMatrixes && res.facialTransformationMatrixes[0];
+  if (!m || !m.data) return { pitch: null, roll: null };
+  const R = (r, c) => m.data[c * 4 + r];
+  return { pitch: Math.atan2(R(2, 1), R(2, 2)) * 180 / Math.PI, roll: Math.atan2(R(1, 0), R(0, 0)) * 180 / Math.PI };
+}
+
+/* ---------- State ---------- */
+let landmarker = null, stream = null, running = false, usingFile = false, lastVideoTime = -1;
+let lastNoFaceBeep = 0, lastStopPrompt = -1e9, lastBreakPrompt = -1e9, driveStart = 0, vibTimer = null, alarmShown = false;
+let frames = 0, fpsT = 0;
+
+async function loadModel() {
+  if (landmarker) return landmarker;
+  setStatus('Cargando modelo…', 'Descargando el modelo de visión (solo la primera vez, ~4 MB).', 0, '#0e141c');
+  const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  const opts = (delegate) => ({
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate },
+    runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true,
+    minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5
+  });
+  try { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('GPU')); }
+  catch (e) { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('CPU')); }
+  return landmarker;
+}
+
+async function listCams() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(x => x.kind === 'videoinput');
+    const sel = $('selCam'); sel.innerHTML = '<option value="">Cámara frontal (por defecto)</option>';
+    devs.forEach((x, i) => { const o = document.createElement('option'); o.value = x.deviceId; o.textContent = x.label || `Cámara ${i + 1}`; sel.appendChild(o); });
+    sel.value = S.camId && devs.some(x => x.deviceId === S.camId) ? S.camId : '';
+  } catch (e) {}
+}
+
+async function openCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  const video_c = S.camId ? { deviceId: { exact: S.camId }, width: { ideal: 640 }, height: { ideal: 480 } }
+                          : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } };
+  stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
+  video.srcObject = stream; video.removeAttribute('src'); usingFile = false;
+  await video.play();
+  listCams();
+}
+
+async function start(fileUrl) {
+  $('btnStart').disabled = true;
+  try {
+    await unlockAudio();
+    await loadModel();
+    if (fileUrl) { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; video.srcObject = null; video.src = fileUrl; video.loop = true; usingFile = true; await video.play(); }
+    else await openCamera();
+  } catch (e) {
+    $('btnStart').disabled = false;
+    const msg = e && e.name === 'NotAllowedError' ? 'Permiso de cámara denegado. Habilítalo en la configuración del navegador.'
+              : e && e.name === 'NotFoundError' ? 'No se encontró una cámara.' : 'No se pudo iniciar: ' + (e && e.message || e);
+    setStatus('Error', msg, 0, '#3b0d0d'); addLog(msg); return;
+  }
+  $('hint').hidden = true; $('fps').hidden = false;
+  running = true; resetSession(); keepAwake(); startCalibration();
+  $('btnStop').disabled = false; $('btnCalib').disabled = false; $('btnRest').disabled = false;
+  $('hdot').style.background = 'var(--ok)';
+  addLog(usingFile ? 'Monitoreo iniciado con video de prueba' : 'Monitoreo iniciado');
+  requestAnimationFrame(loop);
+}
+
+function stop() {
+  running = false; hideAlarm(true);
+  if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
+  video.pause(); try { wakeLock && wakeLock.release(); } catch (e) {}
+  $('btnStart').disabled = false; $('btnStop').disabled = true; $('btnCalib').disabled = true; $('btnRest').disabled = true;
+  $('hdot').style.background = 'var(--mute)'; $('hint').hidden = false; $('fps').hidden = true;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  setStatus('En espera', 'Monitoreo detenido.', 0, '#0e141c'); addLog('Monitoreo detenido');
+}
+
+function resetSession() {
+  const now = performance.now(); det.reset(now);
+  driveStart = now; lastStopPrompt = -1e9; lastBreakPrompt = now;
+}
+function startCalibration() { det.startCalibration(performance.now()); addLog('Calibrando: mira al frente con los ojos abiertos'); }
+
+/* ---------- Main loop ---------- */
+function loop() {
+  if (!running) return;
+  const now = performance.now();
+  if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    W = video.videoWidth || 640; H = video.videoHeight || 480;
+    if (canvas.width !== W) { canvas.width = W; canvas.height = H; }
+    let res = null;
+    try { res = landmarker.detectForVideo(video, now); } catch (e) { console.warn(e); }
+    process(res, now);
+    frames++;
+  }
+  if (now - fpsT > 1000) { $('fps').textContent = `${frames} fps`; frames = 0; fpsT = now; }
+  requestAnimationFrame(loop);
+}
+
+function features(res) {
+  const face = res && res.faceLandmarks && res.faceLandmarks.length ? res.faceLandmarks[0] : null;
+  if (!face) return { face: null, f: null };
+  const cats = res.faceBlendshapes && res.faceBlendshapes[0] ? res.faceBlendshapes[0].categories : [];
+  const g = n => { const c = cats.find(c => c.categoryName === n); return c ? c.score : 0; };
+  const { pitch, roll } = headAngles(res);
+  return { face, f: { blink: (g('eyeBlinkLeft') + g('eyeBlinkRight')) / 2, jaw: g('jawOpen'),
+    ear: (ear(face, LEFT) + ear(face, RIGHT)) / 2, mar: mar(face), pitch, roll } };
+}
+
+function process(res, now) {
+  const { face, f } = features(res);
+  ctx.clearRect(0, 0, W, H);
+  const events = det.update(f, now);
+  for (const ev of events) handle(ev, now);
+  const st = det.stats(now);
+  if (st.calibrating) {
+    const left = Math.max(0, det.cfg.calibSec - (now - det.calib.t0) / 1000);
+    setStatus('Calibrando…', face ? `Mira al frente con los ojos abiertos (${left.toFixed(0)} s)` : 'No veo el rostro. Acerca la cámara y mejora la luz.', 0, '#0e2a3a');
+    if (face) drawFace(face, false, 0);
+    return;
+  }
+  if (face) {
+    drawFace(face, st.closed, st.closedness);
+    $('mEyes').textContent = st.yawning ? 'Bostezo' : st.closed ? 'Cerrados' : 'Abiertos';
+    $('mEyes').style.color = st.yawning ? 'var(--warn)' : st.closed ? 'var(--danger)' : 'var(--ok)';
+    $('bEyes').style.width = (st.closedness * 100).toFixed(0) + '%';
+  } else {
+    $('mEyes').textContent = 'Sin rostro'; $('mEyes').style.color = 'var(--warn)';
+    if (now - det.lastFace > 12000 && now - lastNoFaceBeep > 12000) { lastNoFaceBeep = now; playChime(); }
+  }
+  render(st, now);
+}
+
+function handle(ev, now) {
+  switch (ev.type) {
+    case 'calibrated': addLog(`Calibración lista (apertura ocular base ${ev.base.ear.toFixed(3)})`); break;
+    case 'yawn': addLog(`🥱 Bostezo ${ev.count} de 3`); toast(`🥱 Bostezo ${ev.count} de 3`);
+      if (ev.count < 3 && !det.alarmOn) say(ev.count === 1 ? 'Primer bostezo' : 'Segundo bostezo. Atento al cansancio.'); break;
+    case 'microsleep': addLog(`😴 Microsueño ${ev.count}: ojos cerrados más de 1 s`); toast(`😴 Microsueño ${ev.count}`, 'var(--danger)');
+      beepOnce(); if (!det.alarmOn && ev.count < 2) say('Microsueño detectado. Mantente alerta.'); break;
+    case 'closure_end': addLog(`Ojos cerrados durante ${(ev.dur / 1000).toFixed(1)} s`); break;
+    case 'nod': addLog(`Cabeceo ${ev.count}: ${ev.kind}`); toast(`⚠️ Cabeceo ${ev.count}`, 'var(--high)');
+      beepOnce(); if (!det.alarmOn && ev.count < 2) say('Cabeceo detectado.'); break;
+    case 'face_lost': addLog('⚠️ No se detecta el rostro'); break;
+    case 'face_back': addLog('Rostro detectado de nuevo'); break;
+    case 'alarm': showAlarm(ev.why); break;
+    case 'alarm_end': hideAlarm(); break;
+    case 'stop': if (!det.alarmOn && now - lastStopPrompt > 15000) { lastStopPrompt = now; showStop('Se detectó: ' + ev.reason + '.'); }
+      else addLog('🛑 Señal de descanso: ' + ev.reason); break;
+  }
+}
+
+function render(st, now) {
+  const { perclos, avgBlink } = st;
+  $('mClose').textContent = (st.closedFor / 1000).toFixed(1) + ' s';
+  $('bClose').style.width = clamp(st.closedFor / (S.alarmSec * 1000)) * 100 + '%';
+  $('bClose').style.background = st.closedFor > S.alarmSec * 600 ? 'var(--danger)' : 'var(--accent)';
+  $('mPerclos').textContent = perclos === null ? '…' : (perclos * 100).toFixed(0) + '%';
+  $('bPerclos').style.width = perclos === null ? '0%' : clamp(perclos / 0.3) * 100 + '%';
+  $('bPerclos').style.background = perclos > 0.15 ? 'var(--danger)' : perclos > 0.08 ? 'var(--warn)' : 'var(--ok)';
+  $('mYawn').textContent = st.yawns; $('mLong').textContent = st.microsleeps; $('mNod').textContent = st.nods;
+  $('mBlink').textContent = avgBlink === null ? '…' : Math.round(avgBlink) + ' ms';
+  const dm = Math.floor((now - driveStart) / 60000); $('mDrive').textContent = `${Math.floor(dm / 60)}:${String(dm % 60).padStart(2, '0')}`;
+  const sc = st.score;
+  if (st.alarmOn) setStatus('¡PELIGRO!', det.alarmWhy || 'Ojos cerrados: alarma activada.', 100, '#7f1d1d', 'var(--danger)');
+  else if (sc >= 75) setStatus('Peligro: mucho sueño', 'Detente apenas sea seguro y descansa.', sc, '#5a1a0a', 'var(--danger)');
+  else if (sc >= 55) setStatus('Somnolencia', 'Hay señales claras de sueño. Planifica detenerte ahora.', sc, '#4a2a07', 'var(--high)');
+  else if (sc >= 30) setStatus('Fatiga leve', 'Atento: aparecen las primeras señales de cansancio.', sc, '#3a3207', 'var(--warn)');
+  else setStatus('Alerta', st.faceLost && now - det.lastFace > 3000 ? 'No veo el rostro: ajusta la cámara.' : 'Sin señales de sueño.', sc, '#0b2a17', 'var(--ok)');
+  if (now - driveStart > S.breakHours * 3600000 && now - lastBreakPrompt > 1800000 && !st.alarmOn) {
+    lastBreakPrompt = now; showStop(`Llevas ${Math.floor(dm / 60)} h ${dm % 60} min conduciendo. Toca una pausa.`);
+  }
+}
+
+function setStatus(big, msg, pct, bg, color) {
+  $('stBig').textContent = big; $('stMsg').textContent = msg; $('status').style.background = bg;
+  $('gauge').style.setProperty('--p', pct); $('gauge').style.setProperty('--c', color || 'var(--ok)');
+  $('gaugeV').textContent = Math.round(pct);
+}
+
+/* ---------- Alarm & prompts ---------- */
+function showAlarm(why) {
+  alarmShown = true; $('alarmWhy').textContent = why; $('alarm').classList.add('on');
+  try { speechSynthesis.cancel(); } catch (e) {}
+  siren.currentTime = 0; siren.play().catch(() => {});
+  if (navigator.vibrate) { navigator.vibrate([800, 200, 800, 200, 800]); clearInterval(vibTimer); vibTimer = setInterval(() => navigator.vibrate([800, 200, 800, 200, 800]), 3000); }
+  addLog('🚨 ALARMA: ' + why);
+}
+function hideAlarm(silent) {
+  if (!alarmShown) return;
+  alarmShown = false; siren.pause(); siren.currentTime = 0;
+  clearInterval(vibTimer); if (navigator.vibrate) navigator.vibrate(0);
+  $('alarm').classList.remove('on');
+  if (!silent) { addLog('Alarma detenida'); say('Por tu seguridad, detente a descansar apenas sea posible.'); lastStopPrompt = performance.now(); showStop('Hubo un cierre de ojos prolongado que activó la alarma.', true); }
+}
+function playChime() { chime.currentTime = 0; chime.play().catch(() => {}); }
+function beepOnce() { if (det.alarmOn) return; beep.currentTime = 0; beep.play().catch(() => {}); if (navigator.vibrate) navigator.vibrate(300); }
+function showStop(why, quiet) {
+  $('stopWhy').textContent = why; $('stop').classList.add('on'); playChime();
+  if (!quiet) setTimeout(() => say('Atención. ' + why + ' Detente en un lugar seguro y descansa al menos quince minutos.'), 1300);
+  addLog('🛑 Recomendación de descanso: ' + why);
+}
+
+/* ---------- Drawing ---------- */
+function drawFace(lm, isClosed, closedness) {
+  const col = isClosed ? '#ef4444' : closedness > 0.3 ? '#eab308' : '#22c55e';
+  const ring = (idx, c) => { ctx.beginPath(); idx.forEach((i, k) => { const p = P(lm, i); k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }); ctx.closePath(); ctx.strokeStyle = c; ctx.lineWidth = Math.max(2, W / 320); ctx.stroke(); };
+  ring(EYE_RING_L, col); ring(EYE_RING_R, col); ring(MOUTH, det.yawning ? '#eab308' : '#38bdf8');
+}
+
+/* ---------- Buttons ---------- */
+$('btnStart').onclick = () => start();
+$('btnStop').onclick = stop;
+$('btnCalib').onclick = () => startCalibration();
+$('btnRest').onclick = () => { resetSession(); addLog('Descanso registrado: contadores reiniciados'); };
+$('btnAwake').onclick = () => { det.ack(performance.now()); hideAlarm(); };
+$('btnStopOk').onclick = () => $('stop').classList.remove('on');
+$('btnStopRest').onclick = () => { $('stop').classList.remove('on'); resetSession(); addLog('Descanso registrado: contadores reiniciados'); };
+$('btnTest').onclick = async () => {
+  await unlockAudio(); showAlarm('Prueba de alarma (se apaga en 3 s)');
+  setTimeout(() => hideAlarm(true), 3000);
+};
+$('fileVid').onchange = e => { const f = e.target.files[0]; if (!f) return; if (running) stop(); start(URL.createObjectURL(f)); };
+
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  setStatus('Sin cámara', 'Este navegador no permite usar la cámara aquí. Abre la app desde un enlace https.', 0, '#3b0d0d');
+}
+// Test hook: ?src=<video url> runs the detector on a video file instead of the camera
+if (params.get('src')) start(params.get('src'));
+window.__vigia = () => ({ running, ...det.stats(performance.now()), base: det.base });
+</script>
+</body>
+</html>
