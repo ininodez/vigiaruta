@@ -81,7 +81,7 @@
   <div class="dot" id="hdot"></div>
   <div>
     <h1>VigíaRuta</h1>
-    <div class="sub">Detector de somnolencia para choferes · todo se procesa en este dispositivo</div>
+    <div class="sub">Detector de somnolencia para choferes · todo se procesa en este dispositivo · <b id="ver">v5</b></div>
   </div>
 </header>
 
@@ -100,6 +100,7 @@
       <button id="btnCalib" disabled>Recalibrar</button>
       <button id="btnTest">Probar alarma</button>
       <button id="btnRest" disabled>Tomé un descanso</button>
+      <button id="btnDiag">Copiar diagnóstico</button>
     </div>
     <p class="note">Antes de partir: sube el volumen multimedia al máximo y toca <b>Probar alarma</b>. Mantén la app abierta y en primer plano, con el teléfono cargando. Los navegadores pausan la cámara si cambias de app o se bloquea la pantalla (la app intenta mantener la pantalla encendida).</p>
   </section>
@@ -134,6 +135,12 @@
       <option value="alta">Alta (detecta antes, más falsas alarmas)</option>
       <option value="media" selected>Media (recomendada)</option>
       <option value="baja">Baja (para lentes o ojos muy rasgados)</option>
+    </select>
+    <label for="selEngine">Motor de análisis</label>
+    <select id="selEngine">
+      <option value="auto">Automático (recomendado)</option>
+      <option value="CPU">Estable (CPU)</option>
+      <option value="GPU">Rápido (GPU)</option>
     </select>
     <label for="rngAlarm">Alarma fuerte si los ojos siguen cerrados por</label>
     <div class="row"><input type="range" id="rngAlarm" min="1" max="4" step="0.5" value="2"><output id="oAlarm">2.0 s</output></div>
@@ -198,7 +205,7 @@ const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const params = new URLSearchParams(location.search);
 
 /* ---------- Settings ---------- */
-const S = Object.assign({ sensitivity: 'media', alarmSec: 2, nodSec: DEFAULTS.nodSec, breakHours: 2, voice: true, mirror: true, camId: '' },
+const S = Object.assign({ engine: 'auto', sensitivity: 'media', alarmSec: 2, nodSec: DEFAULTS.nodSec, breakHours: 2, voice: true, mirror: true, camId: '' },
   JSON.parse(localStorage.getItem('vigiaruta') || '{}'));
 if (S.nodSec > 1.5 || S.nodSec < 0.3) S.nodSec = DEFAULTS.nodSec;
 const save = () => localStorage.setItem('vigiaruta', JSON.stringify(S));
@@ -209,6 +216,8 @@ const syncOut = () => { $('oAlarm').textContent = (+S.alarmSec).toFixed(1) + ' s
   $('oNod').textContent = (+S.nodSec).toFixed(1) + ' s'; $('stage').classList.toggle('nomirror', !S.mirror);
   det.setConfig({ sensitivity: S.sensitivity, alarmSec: +S.alarmSec, nodSec: +S.nodSec }); };
 syncOut();
+$('selEngine').value = S.engine || 'auto';
+$('selEngine').onchange = async e => { S.engine = e.target.value; save(); if (landmarker) { const want = engineWanted(); if (want !== delegate) { addLog('Cambiando motor a ' + want); await createLandmarker(want); } } };
 $('selSens').onchange = e => { S.sensitivity = e.target.value; save(); syncOut(); };
 $('rngAlarm').oninput = e => { S.alarmSec = +e.target.value; save(); syncOut(); };
 $('rngNod').oninput = e => { S.nodSec = +e.target.value; save(); syncOut(); };
@@ -242,34 +251,35 @@ const siren = mkAudio(sirenUrl, true), chime = mkAudio(chimeUrl), beep = mkAudio
    1) (does NOT change the iOS audio session: switching it to "playback" can freeze the camera on iPhone);
    2) starts a Web Audio context with an inaudible tone that keeps the audio session awake while monitoring;
    3) plays each <audio> element once (silently) so it can be replayed later without a tap. */
-let AC = null, keepAlive = null, webSiren = null, unlockP = Promise.resolve();
-function audioOk() { return !!AC && AC.state === 'running'; }
-function unlockAudio() {
-  try {
-    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
-    if (AC.state !== 'running') AC.resume().catch(() => {});
-    if (!keepAlive) { const o = AC.createOscillator(), g = AC.createGain(); g.gain.value = 0.0001; o.connect(g); g.connect(AC.destination); o.start(); keepAlive = o; }
-  } catch (e) {}
+let AC = null, webSiren = null, unlockP = Promise.resolve();
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+function audioOk() { return [siren, chime, beep].every(a => a.dataset.unlocked); }
+/* Unlock each <audio> element inside the tap (must run synchronously in the tap handler).
+   The beep is played audibly (it doubles as the "sound is on" confirmation); siren and chime are unlocked silently. */
+function unlockAudio(audibleBeep) {
   const ps = [siren, chime, beep].map(a => {
     if (a.dataset.unlocked) return Promise.resolve();
     if (a._unlocking) return a._unlocking;
     try {
-      a.src = silentUrl; a.loop = false; a.muted = false;
+      const audible = audibleBeep && a === beep;
+      if (!audible) a.src = silentUrl;
+      a.loop = false; a.muted = false; a.currentTime = 0;
       const p = a.play();
-      const p2 = Promise.resolve(p).then(() => { a.pause(); a.dataset.unlocked = '1'; }).catch(() => {})
-        .finally(() => { a.src = a.dataset.src; a.loop = a === siren; a.load(); a._unlocking = null; });
+      const p2 = Promise.resolve(p).then(() => { a.dataset.unlocked = '1'; if (!audible) a.pause(); }).catch(e => diag('audio bloqueado: ' + (e && e.name)))
+        .finally(() => { if (!audible) { a.src = a.dataset.src; a.load(); } a.loop = a === siren; a._unlocking = null; updateSoundBadge(); });
       a._unlocking = p2; return p2;
     } catch (e) { return Promise.resolve(); }
   });
-  try { if ('speechSynthesis' in window) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } } catch (e) {}
   unlockP = Promise.all(ps);
   updateSoundBadge();
   return unlockP;
 }
-// Second, independent siren generated live with Web Audio (louder, works even if the <audio> one is blocked)
+// Extra live-generated siren (louder). Not used on iPhone: Web Audio while the camera runs can freeze the camera there.
 function startWebSiren() {
-  if (!AC) return; stopWebSiren();
+  if (isIOS) return;
+  stopWebSiren();
   try {
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
     if (AC.state !== 'running') AC.resume().catch(() => {});
     const comp = AC.createDynamicsCompressor(); comp.threshold.value = -6; comp.ratio.value = 20; comp.connect(AC.destination);
     const g = AC.createGain(); g.gain.value = 0.9; g.connect(comp);
@@ -282,22 +292,19 @@ function startWebSiren() {
   } catch (e) {}
 }
 function stopWebSiren() { if (webSiren) { webSiren.stop(); webSiren = null; } }
-function webBeep(freq = 1200, ms = 180) {
-  if (!audioOk()) return;
-  try { const o = AC.createOscillator(), g = AC.createGain(); o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.6;
-    o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime + ms / 1000); } catch (e) {}
-}
 function updateSoundBadge() {
   const el = $('sound'); if (!el) return;
-  const ok = audioOk() || (AC && AC.state !== 'suspended');
+  const ok = audioOk();
   el.textContent = ok ? '🔊 Sonido activo' : '🔇 Toca la pantalla para activar el sonido';
   el.style.background = ok ? 'rgba(34,197,94,.85)' : 'rgba(239,68,68,.9)';
 }
-// Any tap re-arms the sound (e.g. after a phone call or after iOS paused audio)
-document.addEventListener('pointerdown', () => { if (!audioOk()) unlockAudio(); }, true);
-setInterval(updateSoundBadge, 2000);
+document.addEventListener('pointerdown', () => { if (!audioOk()) unlockAudio(false); }, true);
+
+/* ---------- Diagnostics (copied with the "Copiar diagnóstico" button) ---------- */
+const DIAG = []; const T0 = Date.now();
+function diag(msg) { DIAG.push(`${((Date.now() - T0) / 1000).toFixed(1)}s ${msg}`); if (DIAG.length > 200) DIAG.shift(); }
 function say(text) {
-  if (!S.voice || !('speechSynthesis' in window)) return;
+  if (!S.voice || !('speechSynthesis' in window) || (isIOS && running && !usingFile)) return;
   try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = 'es-CL'; u.rate = 1.05; u.volume = 1; speechSynthesis.speak(u); } catch (e) {}
 }
 let toastT = 0;
@@ -309,6 +316,7 @@ let wakeLock = null;
 async function keepAwake() { try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && running) { keepAwake(); setTimeout(() => recoverCamera('volviste a la app'), 300); }
+  diag('visibilidad ' + document.visibilityState);
   if (document.visibilityState === 'hidden' && running) addLog('⚠️ App en segundo plano: el monitoreo queda en pausa');
 });
 
@@ -343,20 +351,22 @@ function headAngles(res) {
 /* ---------- State ---------- */
 let landmarker = null, stream = null, running = false, usingFile = false, lastVideoTime = -1;
 let lastNoFaceBeep = 0, lastStopPrompt = -1e9, lastBreakPrompt = -1e9, driveStart = 0, vibTimer = null, alarmShown = false;
-let frames = 0, camFrames = 0, fpsT = 0, loopId = 0;
-let fileset = null, delegate = 'GPU', lastFrameAt = 0, lastDetect = 0, lastRecover = 0, detectErrors = 0, slowDetects = 0, switching = false;
+let frames = 0, camFrames = 0, fpsT = 0, loopId = 0, lastTook = 0;
+let fileset = null, delegate = 'CPU', lastFrameAt = 0, lastDetect = 0, lastRecover = 0, detectErrors = 0, slowDetects = 0, switching = false;
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 // Count real decoded camera frames (more reliable than currentTime on Safari)
 let vfc = 0, lastVfc = 0;
 const hasVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 if (hasVFC) { const arm = () => video.requestVideoFrameCallback(() => { vfc++; arm(); }); arm(); }
+function engineWanted() { return S.engine === 'GPU' || S.engine === 'CPU' ? S.engine : (isMobile ? 'CPU' : 'GPU'); }
 const ANALYSIS_FPS = isMobile ? 15 : 24;   // analysing every camera frame (60 fps) overheats phones and stalls the camera
 
 async function loadModel() {
   if (landmarker) return landmarker;
   setStatus('Cargando modelo…', 'Descargando el modelo de visión (solo la primera vez, ~4 MB).', 0, '#0e141c');
   fileset = fileset || await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
-  await createLandmarker(delegate);
+  await createLandmarker(engineWanted());
+  diag(`modelo listo: ${delegate}`);
   return landmarker;
 }
 async function createLandmarker(want) {
@@ -397,8 +407,10 @@ async function openCamera() {
   video.srcObject = stream; video.removeAttribute('src'); usingFile = false;
   const track = stream.getVideoTracks()[0];
   if (track) {
-    track.onended = () => { if (running) { addLog('⚠️ La cámara se cortó: reconectando'); recoverCamera('cámara cortada', true); } };
-    track.onmute = () => { if (running) addLog('⚠️ El sistema pausó la cámara'); };
+    track.onended = () => { diag('track ended'); if (running) { addLog('⚠️ La cámara se cortó: reconectando'); recoverCamera('cámara cortada', true); } };
+    track.onmute = () => { diag('track mute'); if (running) addLog('⚠️ El sistema pausó la cámara'); };
+    track.onunmute = () => { diag('track unmute'); };
+    const st = track.getSettings ? track.getSettings() : {}; diag(`cámara abierta ${st.width}x${st.height} @${st.frameRate} fps`);
   }
   await video.play();
   lastFrameAt = performance.now();
@@ -413,16 +425,15 @@ async function recoverCamera(why, force) {
   const track = stream && stream.getVideoTracks()[0];
   const dead = !track || track.readyState === 'ended' || !stream.active;
   try {
-    if (!dead && !force && now - lastFrameAt < 5000) { await video.play(); return; }
-    addLog(`Reconectando la cámara (${why})`);
+    if (!dead && !force && now - lastFrameAt < 5000) { diag(`reanudar video (${why}), paused=${video.paused} ready=${video.readyState} track=${track && track.readyState} muted=${track && track.muted}`); await video.play(); return; }
+    addLog(`Reconectando la cámara (${why})`); diag('reconectar: ' + why);
     await openCamera();
   } catch (e) { addLog('No se pudo reconectar la cámara: ' + (e.message || e)); }
 }
 
 async function start(fileUrl) {
   $('btnStart').disabled = true;
-  unlockAudio();                       // synchronous, still inside the tap
-  setTimeout(() => { webBeep(1000, 120); setTimeout(() => webBeep(1500, 160), 180); }, 150);   // "sound is on" chirp
+  unlockAudio(true);                   // synchronous, still inside the tap (plays the "sound on" beep)
   try {
     await loadModel();
     if (fileUrl) { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; video.srcObject = null; video.src = fileUrl; video.loop = true; usingFile = true; await video.play(); }
@@ -458,6 +469,14 @@ function resetSession() {
 function startCalibration() { det.startCalibration(performance.now()); addLog('Calibrando: mira al frente con los ojos abiertos'); }
 
 /* ---------- Main loop ---------- */
+const snap = document.createElement('canvas'), sctx = snap.getContext('2d', { willReadFrequently: true });
+function snapshot() {
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480, sc = Math.min(1, 320 / Math.max(vw, vh));
+  const w = Math.round(vw * sc), h = Math.round(vh * sc);
+  if (snap.width !== w || snap.height !== h) { snap.width = w; snap.height = h; }
+  sctx.drawImage(video, 0, 0, w, h);
+  return snap;
+}
 function loop(id) {
   if (!running || id !== loopId) return;
   const now = performance.now();
@@ -468,9 +487,9 @@ function loop(id) {
       W = video.videoWidth || 640; H = video.videoHeight || 480;
       if (canvas.width !== W) { canvas.width = W; canvas.height = H; }
       let res = null; const t0 = performance.now();
-      try { res = landmarker.detectForVideo(video, now); detectErrors = 0; }
+      try { res = landmarker.detectForVideo(snapshot(), now); detectErrors = 0; }
       catch (e) { console.warn(e); if (++detectErrors >= 3) switchToCPU('errores del modelo'); }
-      const took = performance.now() - t0;
+      const took = performance.now() - t0; lastTook = took;
       if (delegate === 'GPU') { slowDetects = took > 250 ? slowDetects + 1 : Math.max(0, slowDetects - 1); if (slowDetects >= 5) switchToCPU(`análisis lento (${Math.round(took)} ms)`); }
       try { process(res, now); } catch (e) { console.warn(e); }
       frames++;
@@ -481,6 +500,7 @@ function loop(id) {
     if (tr && tr.readyState === 'ended') recoverCamera('cámara cortada');
     else if (now - lastFrameAt > 2000) recoverCamera('imagen congelada');
   }
+  if (now - fpsT > 1000 && (camFrames === 0 || frames === 0)) diag(`fps cam=${camFrames} análisis=${frames} detect=${Math.round(lastTook)}ms vis=${document.visibilityState}`);
   if (now - fpsT > 1000) { $('fps').textContent = `📷 ${camFrames} fps · análisis ${frames} fps${delegate === 'CPU' ? ' (CPU)' : ''}`; frames = 0; camFrames = 0; fpsT = now; }
   requestAnimationFrame(() => loop(id));
 }
@@ -569,7 +589,7 @@ function setStatus(big, msg, pct, bg, color) {
 /* ---------- Alarm & prompts ---------- */
 function showAlarm(why) {
   alarmShown = true; $('alarmWhy').textContent = why; $('alarm').classList.add('on');
-  try { speechSynthesis.cancel(); } catch (e) {}
+  try { if (!isIOS) speechSynthesis.cancel(); } catch (e) {}
   startWebSiren();
   unlockP.then(() => { if (!alarmShown) return; siren.currentTime = 0; siren.play().catch(() => {}); });
   if (navigator.vibrate) { navigator.vibrate([800, 200, 800, 200, 800]); clearInterval(vibTimer); vibTimer = setInterval(() => navigator.vibrate([800, 200, 800, 200, 800]), 3000); }
@@ -583,7 +603,7 @@ function hideAlarm(silent) {
   if (!silent) { addLog('Alarma detenida'); say('Por tu seguridad, detente a descansar apenas sea posible.'); lastStopPrompt = performance.now(); showStop('Hubo un cierre de ojos prolongado que activó la alarma.', true); }
 }
 function playChime() { chime.currentTime = 0; chime.play().catch(() => {}); }
-function beepOnce() { if (det.alarmOn) return; beep.currentTime = 0; beep.play().catch(() => webBeep()); if (navigator.vibrate) navigator.vibrate(300); }
+function beepOnce() { if (det.alarmOn) return; beep.currentTime = 0; beep.play().catch(() => {}); if (navigator.vibrate) navigator.vibrate(300); }
 function showStop(why, quiet) {
   $('stopWhy').textContent = why; $('stop').classList.add('on'); playChime();
   if (!quiet) setTimeout(() => say('Atención. ' + why + ' Detente en un lugar seguro y descansa al menos quince minutos.'), 1300);
@@ -599,6 +619,14 @@ function drawFace(lm, isClosed, closedness) {
 
 /* ---------- Buttons ---------- */
 $('btnStart').onclick = () => start();
+$('btnDiag').onclick = async () => {
+  const tr = stream && stream.getVideoTracks()[0];
+  const txt = [`VigíaRuta ${$('ver').textContent}`, navigator.userAgent, `motor=${delegate} análisisFps=${ANALYSIS_FPS} iOS=${isIOS} móvil=${isMobile} rVFC=${hasVFC}`,
+    `track=${tr ? tr.readyState + ' muted=' + tr.muted : 'none'} video paused=${video.paused} ready=${video.readyState} ${video.videoWidth}x${video.videoHeight}`,
+    `fps ahora: ${$('fps').textContent}`, '--- eventos ---', ...DIAG.slice(-80)].join('\n');
+  try { await navigator.clipboard.writeText(txt); toast('Diagnóstico copiado: pégalo en el chat', 'var(--ok)'); }
+  catch (e) { const w = window.open('', '_blank'); if (w) { w.document.body.innerText = txt; } else alert(txt); }
+};
 $('btnStop').onclick = stop;
 $('btnCalib').onclick = () => startCalibration();
 $('btnRest').onclick = () => { resetSession(); addLog('Descanso registrado: contadores reiniciados'); };
@@ -606,7 +634,7 @@ $('btnAwake').onclick = () => { det.ack(performance.now()); hideAlarm(); };
 $('btnStopOk').onclick = () => $('stop').classList.remove('on');
 $('btnStopRest').onclick = () => { $('stop').classList.remove('on'); resetSession(); addLog('Descanso registrado: contadores reiniciados'); };
 $('btnTest').onclick = () => {
-  unlockAudio(); showAlarm('Prueba de alarma (se apaga en 3 s)');
+  unlockAudio(false); showAlarm('Prueba de alarma (se apaga en 3 s)');
   setTimeout(() => hideAlarm(true), 3000);
 };
 $('fileVid').onchange = e => { const f = e.target.files[0]; if (!f) return; if (running) stop(); start(URL.createObjectURL(f)); };
