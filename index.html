@@ -239,13 +239,12 @@ const siren = mkAudio(sirenUrl, true), chime = mkAudio(chimeUrl), beep = mkAudio
 
 /* Phones only let a page make sound after a tap, and each sound must be "unlocked" inside that tap.
    unlockAudio() MUST run synchronously inside a tap handler (no await before it). It:
-   1) asks iOS (17+) to treat the page as media playback, so it also sounds with the ringer switch on silent;
+   1) (does NOT change the iOS audio session: switching it to "playback" can freeze the camera on iPhone);
    2) starts a Web Audio context with an inaudible tone that keeps the audio session awake while monitoring;
    3) plays each <audio> element once (silently) so it can be replayed later without a tap. */
 let AC = null, keepAlive = null, webSiren = null, unlockP = Promise.resolve();
 function audioOk() { return !!AC && AC.state === 'running'; }
 function unlockAudio() {
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
   try {
     AC = AC || new (window.AudioContext || window.webkitAudioContext)();
     if (AC.state !== 'running') AC.resume().catch(() => {});
@@ -309,7 +308,7 @@ function toast(text, color = 'var(--warn)') { const el = $('toast'); el.textCont
 let wakeLock = null;
 async function keepAwake() { try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && running) keepAwake();
+  if (document.visibilityState === 'visible' && running) { keepAwake(); setTimeout(() => recoverCamera('volviste a la app'), 300); }
   if (document.visibilityState === 'hidden' && running) addLog('⚠️ App en segundo plano: el monitoreo queda en pausa');
 });
 
@@ -344,20 +343,40 @@ function headAngles(res) {
 /* ---------- State ---------- */
 let landmarker = null, stream = null, running = false, usingFile = false, lastVideoTime = -1;
 let lastNoFaceBeep = 0, lastStopPrompt = -1e9, lastBreakPrompt = -1e9, driveStart = 0, vibTimer = null, alarmShown = false;
-let frames = 0, fpsT = 0;
+let frames = 0, camFrames = 0, fpsT = 0, loopId = 0;
+let fileset = null, delegate = 'GPU', lastFrameAt = 0, lastDetect = 0, lastRecover = 0, detectErrors = 0, slowDetects = 0, switching = false;
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+// Count real decoded camera frames (more reliable than currentTime on Safari)
+let vfc = 0, lastVfc = 0;
+const hasVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+if (hasVFC) { const arm = () => video.requestVideoFrameCallback(() => { vfc++; arm(); }); arm(); }
+const ANALYSIS_FPS = isMobile ? 15 : 24;   // analysing every camera frame (60 fps) overheats phones and stalls the camera
 
 async function loadModel() {
   if (landmarker) return landmarker;
   setStatus('Cargando modelo…', 'Descargando el modelo de visión (solo la primera vez, ~4 MB).', 0, '#0e141c');
-  const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  fileset = fileset || await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  await createLandmarker(delegate);
+  return landmarker;
+}
+async function createLandmarker(want) {
   const opts = (delegate) => ({
     baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate },
     runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true,
     minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5
   });
-  try { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('GPU')); }
-  catch (e) { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('CPU')); }
-  return landmarker;
+  const old = landmarker; landmarker = null;
+  try { if (old) old.close(); } catch (e) {}
+  try { landmarker = await FaceLandmarker.createFromOptions(fileset, opts(want)); delegate = want; }
+  catch (e) { landmarker = await FaceLandmarker.createFromOptions(fileset, opts('CPU')); delegate = 'CPU'; }
+  detectErrors = 0; slowDetects = 0;
+}
+// If the GPU path errors or is slow on this phone, fall back to the CPU path (slower per frame but stable)
+async function switchToCPU(why) {
+  if (switching || delegate === 'CPU') return;
+  switching = true; addLog(`Cambiando a modo de análisis estable (CPU): ${why}`);
+  try { await createLandmarker('CPU'); } catch (e) { addLog('No se pudo reiniciar el modelo: ' + (e.message || e)); }
+  switching = false;
 }
 
 async function listCams() {
@@ -371,12 +390,33 @@ async function listCams() {
 
 async function openCamera() {
   if (stream) stream.getTracks().forEach(t => t.stop());
-  const video_c = S.camId ? { deviceId: { exact: S.camId }, width: { ideal: 640 }, height: { ideal: 480 } }
-                          : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } };
-  stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
+  const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } };
+  const video_c = S.camId ? { ...base, deviceId: { exact: S.camId } } : { ...base, facingMode: 'user' };
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false }); }
+  catch (e) { if (e && (e.name === 'OverconstrainedError' || e.name === 'NotReadableError')) stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }); else throw e; }
   video.srcObject = stream; video.removeAttribute('src'); usingFile = false;
+  const track = stream.getVideoTracks()[0];
+  if (track) {
+    track.onended = () => { if (running) { addLog('⚠️ La cámara se cortó: reconectando'); recoverCamera('cámara cortada', true); } };
+    track.onmute = () => { if (running) addLog('⚠️ El sistema pausó la cámara'); };
+  }
   await video.play();
+  lastFrameAt = performance.now();
   listCams();
+}
+// Watchdog: if no new camera frame arrives for 2 s, resume the video; if that does not help, reopen the camera.
+async function recoverCamera(why, force) {
+  if (!running || usingFile) return;
+  const now = performance.now();
+  if (now - lastRecover < 3000 && !force) return;
+  lastRecover = now;
+  const track = stream && stream.getVideoTracks()[0];
+  const dead = !track || track.readyState === 'ended' || !stream.active;
+  try {
+    if (!dead && !force && now - lastFrameAt < 5000) { await video.play(); return; }
+    addLog(`Reconectando la cámara (${why})`);
+    await openCamera();
+  } catch (e) { addLog('No se pudo reconectar la cámara: ' + (e.message || e)); }
 }
 
 async function start(fileUrl) {
@@ -398,7 +438,7 @@ async function start(fileUrl) {
   $('btnStop').disabled = false; $('btnCalib').disabled = false; $('btnRest').disabled = false;
   $('hdot').style.background = 'var(--ok)';
   addLog(usingFile ? 'Monitoreo iniciado con video de prueba' : 'Monitoreo iniciado');
-  requestAnimationFrame(loop);
+  lastFrameAt = performance.now(); const id = ++loopId; requestAnimationFrame(() => loop(id));
 }
 
 function stop() {
@@ -418,20 +458,31 @@ function resetSession() {
 function startCalibration() { det.startCalibration(performance.now()); addLog('Calibrando: mira al frente con los ojos abiertos'); }
 
 /* ---------- Main loop ---------- */
-function loop() {
-  if (!running) return;
+function loop(id) {
+  if (!running || id !== loopId) return;
   const now = performance.now();
-  if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
-    lastVideoTime = video.currentTime;
-    W = video.videoWidth || 640; H = video.videoHeight || 480;
-    if (canvas.width !== W) { canvas.width = W; canvas.height = H; }
-    let res = null;
-    try { res = landmarker.detectForVideo(video, now); } catch (e) { console.warn(e); }
-    process(res, now);
-    frames++;
+  if (video.readyState >= 2 && (hasVFC ? vfc !== lastVfc : video.currentTime !== lastVideoTime)) {
+    lastVideoTime = video.currentTime; lastVfc = vfc; lastFrameAt = now; camFrames++;
+    if (now - lastDetect >= 1000 / ANALYSIS_FPS - 4 && landmarker && !switching) {
+      lastDetect = now;
+      W = video.videoWidth || 640; H = video.videoHeight || 480;
+      if (canvas.width !== W) { canvas.width = W; canvas.height = H; }
+      let res = null; const t0 = performance.now();
+      try { res = landmarker.detectForVideo(video, now); detectErrors = 0; }
+      catch (e) { console.warn(e); if (++detectErrors >= 3) switchToCPU('errores del modelo'); }
+      const took = performance.now() - t0;
+      if (delegate === 'GPU') { slowDetects = took > 250 ? slowDetects + 1 : Math.max(0, slowDetects - 1); if (slowDetects >= 5) switchToCPU(`análisis lento (${Math.round(took)} ms)`); }
+      try { process(res, now); } catch (e) { console.warn(e); }
+      frames++;
+    }
   }
-  if (now - fpsT > 1000) { $('fps').textContent = `${frames} fps`; frames = 0; fpsT = now; }
-  requestAnimationFrame(loop);
+  const tr = stream && stream.getVideoTracks()[0];
+  if (!usingFile && document.visibilityState === 'visible') {
+    if (tr && tr.readyState === 'ended') recoverCamera('cámara cortada');
+    else if (now - lastFrameAt > 2000) recoverCamera('imagen congelada');
+  }
+  if (now - fpsT > 1000) { $('fps').textContent = `📷 ${camFrames} fps · análisis ${frames} fps${delegate === 'CPU' ? ' (CPU)' : ''}`; frames = 0; camFrames = 0; fpsT = now; }
+  requestAnimationFrame(() => loop(id));
 }
 
 function features(res) {
@@ -565,6 +616,8 @@ if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
 }
 // Test hook: ?src=<video url> runs the detector on a video file instead of the camera
 if (params.get('src')) start(params.get('src'));
+window.__cam = () => ({ delegate, camFps: $('fps').textContent, lastFrameAgo: Math.round(performance.now() - lastFrameAt), trackState: stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].readyState, loopId });
+window.__killCam = () => stream && stream.getVideoTracks()[0].stop();
 window.__audio = () => ({ ac: AC && AC.state, sirenPlaying: !siren.paused, sirenReal: siren.src === sirenUrl, unlocked: [siren, chime, beep].map(a => !!a.dataset.unlocked), web: !!webSiren, badge: $('sound').textContent });
 window.__vigia = () => ({ running, ...det.stats(performance.now()), base: det.base });
 </script>
