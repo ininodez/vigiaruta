@@ -92,6 +92,7 @@
       <canvas id="overlay"></canvas>
       <div class="hint" id="hint">Pon el teléfono o laptop frente al chofer, con la cara bien iluminada, y toca <b>&nbsp;Iniciar&nbsp;</b>.</div>
       <div class="badge" id="fps" hidden>—</div>
+      <div class="badge" id="sound" style="left:auto;right:10px">🔇 Sonido inactivo</div>
     </div>
     <div class="btns">
       <button class="primary" id="btnStart">Iniciar</button>
@@ -100,7 +101,7 @@
       <button id="btnTest">Probar alarma</button>
       <button id="btnRest" disabled>Tomé un descanso</button>
     </div>
-    <p class="note">Mantén la app abierta y en primer plano, con el volumen al máximo y el teléfono cargando. Los navegadores pausan la cámara si cambias de app o se bloquea la pantalla (la app intenta mantener la pantalla encendida).</p>
+    <p class="note">Antes de partir: sube el volumen multimedia al máximo y toca <b>Probar alarma</b>. Mantén la app abierta y en primer plano, con el teléfono cargando. Los navegadores pausan la cámara si cambias de app o se bloquea la pantalla (la app intenta mantener la pantalla encendida).</p>
   </section>
 
   <section class="card">
@@ -228,15 +229,74 @@ function makeWav(seconds, fn, sr = 22050) {
     const s = Math.sin(ph), x = sq ? clamp(s * 3, -1, 1) : s; v.setInt16(44 + i * 2, clamp(x * a, -1, 1) * 32767, true); }
   return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
-const sirenUrl = makeWav(2, t => ({ f: Math.floor(t * 4) % 2 ? 1650 : 980, a: 1, sq: true }));
+// Yelp siren sweeping 1000→2500 Hz (the band phone speakers play loudest), clipped square wave for maximum loudness
+const sirenUrl = makeWav(2, t => { const ph = (t * 2) % 1; return { f: 1000 + 1500 * (ph < 0.5 ? ph * 2 : 2 - ph * 2), a: 1, sq: true }; });
 const chimeUrl = makeWav(1.4, t => ({ f: t < 0.45 ? 660 : t < 0.9 ? 880 : 990, a: 0.7 * Math.exp(-((t % 0.45) * 3)), sq: false }));
 const beepUrl = makeWav(0.5, t => ({ f: t < 0.22 ? 1200 : t < 0.28 ? 0 : 1200, a: t < 0.22 || t > 0.28 ? 0.9 : 0, sq: true }));
-const siren = new Audio(sirenUrl); siren.loop = true; siren.volume = 1;
-const chime = new Audio(chimeUrl); chime.volume = 1;
-const beep = new Audio(beepUrl); beep.volume = 1;
-async function unlockAudio() {
-  for (const a of [siren, chime, beep]) { try { a.muted = true; await a.play(); a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} }
+const silentUrl = makeWav(0.3, () => ({ f: 440, a: 0, sq: false }));
+const mkAudio = (url, loop = false) => { const a = new Audio(url); a.dataset.src = url; a.loop = loop; a.preload = 'auto'; a.setAttribute('playsinline', ''); return a; };
+const siren = mkAudio(sirenUrl, true), chime = mkAudio(chimeUrl), beep = mkAudio(beepUrl);
+
+/* Phones only let a page make sound after a tap, and each sound must be "unlocked" inside that tap.
+   unlockAudio() MUST run synchronously inside a tap handler (no await before it). It:
+   1) asks iOS (17+) to treat the page as media playback, so it also sounds with the ringer switch on silent;
+   2) starts a Web Audio context with an inaudible tone that keeps the audio session awake while monitoring;
+   3) plays each <audio> element once (silently) so it can be replayed later without a tap. */
+let AC = null, keepAlive = null, webSiren = null, unlockP = Promise.resolve();
+function audioOk() { return !!AC && AC.state === 'running'; }
+function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  try {
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    if (AC.state !== 'running') AC.resume().catch(() => {});
+    if (!keepAlive) { const o = AC.createOscillator(), g = AC.createGain(); g.gain.value = 0.0001; o.connect(g); g.connect(AC.destination); o.start(); keepAlive = o; }
+  } catch (e) {}
+  const ps = [siren, chime, beep].map(a => {
+    if (a.dataset.unlocked) return Promise.resolve();
+    if (a._unlocking) return a._unlocking;
+    try {
+      a.src = silentUrl; a.loop = false; a.muted = false;
+      const p = a.play();
+      const p2 = Promise.resolve(p).then(() => { a.pause(); a.dataset.unlocked = '1'; }).catch(() => {})
+        .finally(() => { a.src = a.dataset.src; a.loop = a === siren; a.load(); a._unlocking = null; });
+      a._unlocking = p2; return p2;
+    } catch (e) { return Promise.resolve(); }
+  });
+  try { if ('speechSynthesis' in window) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } } catch (e) {}
+  unlockP = Promise.all(ps);
+  updateSoundBadge();
+  return unlockP;
 }
+// Second, independent siren generated live with Web Audio (louder, works even if the <audio> one is blocked)
+function startWebSiren() {
+  if (!AC) return; stopWebSiren();
+  try {
+    if (AC.state !== 'running') AC.resume().catch(() => {});
+    const comp = AC.createDynamicsCompressor(); comp.threshold.value = -6; comp.ratio.value = 20; comp.connect(AC.destination);
+    const g = AC.createGain(); g.gain.value = 0.9; g.connect(comp);
+    const o1 = AC.createOscillator(), o2 = AC.createOscillator(); o1.type = 'square'; o2.type = 'sawtooth';
+    o1.frequency.value = 1750; o2.frequency.value = 1760;
+    const lfo = AC.createOscillator(), depth = AC.createGain(); lfo.type = 'triangle'; lfo.frequency.value = 2; depth.gain.value = 750;
+    lfo.connect(depth); depth.connect(o1.frequency); depth.connect(o2.frequency);
+    o1.connect(g); o2.connect(g); o1.start(); o2.start(); lfo.start();
+    webSiren = { stop: () => { [o1, o2, lfo].forEach(o => { try { o.stop(); } catch (e) {} }); try { comp.disconnect(); } catch (e) {} } };
+  } catch (e) {}
+}
+function stopWebSiren() { if (webSiren) { webSiren.stop(); webSiren = null; } }
+function webBeep(freq = 1200, ms = 180) {
+  if (!audioOk()) return;
+  try { const o = AC.createOscillator(), g = AC.createGain(); o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.6;
+    o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime + ms / 1000); } catch (e) {}
+}
+function updateSoundBadge() {
+  const el = $('sound'); if (!el) return;
+  const ok = audioOk() || (AC && AC.state !== 'suspended');
+  el.textContent = ok ? '🔊 Sonido activo' : '🔇 Toca la pantalla para activar el sonido';
+  el.style.background = ok ? 'rgba(34,197,94,.85)' : 'rgba(239,68,68,.9)';
+}
+// Any tap re-arms the sound (e.g. after a phone call or after iOS paused audio)
+document.addEventListener('pointerdown', () => { if (!audioOk()) unlockAudio(); }, true);
+setInterval(updateSoundBadge, 2000);
 function say(text) {
   if (!S.voice || !('speechSynthesis' in window)) return;
   try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = 'es-CL'; u.rate = 1.05; u.volume = 1; speechSynthesis.speak(u); } catch (e) {}
@@ -321,8 +381,9 @@ async function openCamera() {
 
 async function start(fileUrl) {
   $('btnStart').disabled = true;
+  unlockAudio();                       // synchronous, still inside the tap
+  setTimeout(() => { webBeep(1000, 120); setTimeout(() => webBeep(1500, 160), 180); }, 150);   // "sound is on" chirp
   try {
-    await unlockAudio();
     await loadModel();
     if (fileUrl) { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; video.srcObject = null; video.src = fileUrl; video.loop = true; usingFile = true; await video.play(); }
     else await openCamera();
@@ -458,19 +519,20 @@ function setStatus(big, msg, pct, bg, color) {
 function showAlarm(why) {
   alarmShown = true; $('alarmWhy').textContent = why; $('alarm').classList.add('on');
   try { speechSynthesis.cancel(); } catch (e) {}
-  siren.currentTime = 0; siren.play().catch(() => {});
+  startWebSiren();
+  unlockP.then(() => { if (!alarmShown) return; siren.currentTime = 0; siren.play().catch(() => {}); });
   if (navigator.vibrate) { navigator.vibrate([800, 200, 800, 200, 800]); clearInterval(vibTimer); vibTimer = setInterval(() => navigator.vibrate([800, 200, 800, 200, 800]), 3000); }
   addLog('🚨 ALARMA: ' + why);
 }
 function hideAlarm(silent) {
   if (!alarmShown) return;
-  alarmShown = false; siren.pause(); siren.currentTime = 0;
+  alarmShown = false; siren.pause(); siren.currentTime = 0; stopWebSiren();
   clearInterval(vibTimer); if (navigator.vibrate) navigator.vibrate(0);
   $('alarm').classList.remove('on');
   if (!silent) { addLog('Alarma detenida'); say('Por tu seguridad, detente a descansar apenas sea posible.'); lastStopPrompt = performance.now(); showStop('Hubo un cierre de ojos prolongado que activó la alarma.', true); }
 }
 function playChime() { chime.currentTime = 0; chime.play().catch(() => {}); }
-function beepOnce() { if (det.alarmOn) return; beep.currentTime = 0; beep.play().catch(() => {}); if (navigator.vibrate) navigator.vibrate(300); }
+function beepOnce() { if (det.alarmOn) return; beep.currentTime = 0; beep.play().catch(() => webBeep()); if (navigator.vibrate) navigator.vibrate(300); }
 function showStop(why, quiet) {
   $('stopWhy').textContent = why; $('stop').classList.add('on'); playChime();
   if (!quiet) setTimeout(() => say('Atención. ' + why + ' Detente en un lugar seguro y descansa al menos quince minutos.'), 1300);
@@ -492,8 +554,8 @@ $('btnRest').onclick = () => { resetSession(); addLog('Descanso registrado: cont
 $('btnAwake').onclick = () => { det.ack(performance.now()); hideAlarm(); };
 $('btnStopOk').onclick = () => $('stop').classList.remove('on');
 $('btnStopRest').onclick = () => { $('stop').classList.remove('on'); resetSession(); addLog('Descanso registrado: contadores reiniciados'); };
-$('btnTest').onclick = async () => {
-  await unlockAudio(); showAlarm('Prueba de alarma (se apaga en 3 s)');
+$('btnTest').onclick = () => {
+  unlockAudio(); showAlarm('Prueba de alarma (se apaga en 3 s)');
   setTimeout(() => hideAlarm(true), 3000);
 };
 $('fileVid').onchange = e => { const f = e.target.files[0]; if (!f) return; if (running) stop(); start(URL.createObjectURL(f)); };
@@ -503,6 +565,7 @@ if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
 }
 // Test hook: ?src=<video url> runs the detector on a video file instead of the camera
 if (params.get('src')) start(params.get('src'));
+window.__audio = () => ({ ac: AC && AC.state, sirenPlaying: !siren.paused, sirenReal: siren.src === sirenUrl, unlocked: [siren, chime, beep].map(a => !!a.dataset.unlocked), web: !!webSiren, badge: $('sound').textContent });
 window.__vigia = () => ({ running, ...det.stats(performance.now()), base: det.base });
 </script>
 </body>
